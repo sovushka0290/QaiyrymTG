@@ -9,13 +9,12 @@ import math
 import os
 import re
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from urllib.parse import parse_qsl
 
 import requests
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
-from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 import gspread
@@ -49,13 +48,12 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://qaiyrym-b0-t.vercel.app/")
 APPS_SCRIPT_URL = os.getenv("APPS_SCRIPT_URL", "")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "")
 SOLANA_EXPLORER_BASE = os.getenv("SOLANA_EXPLORER_BASE", "https://solscan.io/tx")
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8080"))
+API_PORT = int(os.getenv("PORT", os.getenv("API_PORT", "8080")))
 API_ENABLED = os.getenv("API_ENABLED", "1") == "1"
 SYNC_CACHE_TTL_SEC = int(os.getenv("SYNC_CACHE_TTL_SEC", "30"))
 
@@ -93,6 +91,15 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Волонтёры")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+# Создаем файл credentials из переменной окружения, если нужно
+if os.getenv("GOOGLE_CREDENTIALS_JSON") and not os.path.exists(GOOGLE_CREDENTIALS_PATH):
+    try:
+        with open(GOOGLE_CREDENTIALS_PATH, "w") as f:
+            json.dump(json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON")), f)
+        logger.info("[SHEETS] Credentials file created from environment variable")
+    except Exception as e:
+        logger.error(f"[SHEETS] Failed to create credentials file: {e}")
+
 def get_sheets_client():
     """Инициализация клиента Google Sheets."""
     if not GOOGLE_SHEET_ID:
@@ -108,7 +115,8 @@ def get_sheets_client():
         gc = gspread.authorize(creds)
         sheet = gc.open_by_key(GOOGLE_SHEET_ID)
         logger.info(f"[SHEETS] Подключено к Google Sheets: {GOOGLE_SHEET_NAME}")
-@@ -74,417 +109,1286 @@ def get_sheets_client():
+        return sheet, GOOGLE_SHEET_NAME
+    except Exception as e:
         logger.error(f"[SHEETS ERROR] {e}")
         return None, None
 
@@ -323,8 +331,6 @@ def save_users_db():
 def get_user_role(user_id: str) -> str:
     """Возвращает роль пользователя."""
     if user_id in USERS_DATA:
-        return USERS_DATA[user_id].get("role", "GUEST")
-    return "GUEST"
         return USERS_DATA[user_id].get("role", ROLE_GUEST)
     return ROLE_GUEST
 
@@ -337,7 +343,6 @@ def save_user_registration(user_id: str, name: str, age: int, skill: str, lang: 
             "age": age,
             "skill": skill,
             "lang": lang,
-            "role": "MEMBER",
             "role": ROLE_VOLUNTEER,
             "username": (username or "").lstrip("@"),
             "registered_at": datetime.now().isoformat(),
@@ -353,14 +358,12 @@ def save_user_registration(user_id: str, name: str, age: int, skill: str, lang: 
 def set_user_language(user_id: str, lang: str):
     """Сохраняет язык пользователя."""
     if user_id not in USERS_DATA:
-        USERS_DATA[user_id] = {"role": "GUEST"}
         USERS_DATA[user_id] = {"role": ROLE_GUEST}
     USERS_DATA[user_id]["lang"] = lang
     save_users_db()
 
 def get_all_member_ids() -> List[str]:
     """Возвращает список волонтеров."""
-    return [user_id for user_id, data in USERS_DATA.items() if data.get("role") == "MEMBER"]
     return [
         user_id
         for user_id, data in USERS_DATA.items()
@@ -1071,7 +1074,6 @@ def get_gemini_client():
 
 def get_chat_system_instruction(user_lang: str, role: str = "GUEST", chat_history_len: int = 0) -> str:
     """Формирует системный промпт для ИИ."""
-    lang = user_lang if user_lang in ("ru", "kz") else "ru"
     lang = normalize_lang(user_lang) if normalize_lang(user_lang) in ("ru", "kk") else "ru"
     lang_name = "русском" if lang == "ru" else "казахском"
     
@@ -1107,7 +1109,6 @@ def get_chat_system_instruction(user_lang: str, role: str = "GUEST", chat_histor
     else:
         base += "\n⭐ ПОСЛЕДУЮЩИЕ: НЕ повторяй приветствие, продолжи диалог.\n"
     
-    if role == "MEMBER":
     if role in {ROLE_VOLUNTEER, ROLE_COORDINATOR, ROLE_WAREHOUSE_ADMIN}:
         base += "\n👤 РЕЖИМ УЧАСТНИКА: Обсуждай глубокие темы, детали помощи."
         base += (
@@ -1128,11 +1129,10 @@ def get_chat_system_instruction(user_lang: str, role: str = "GUEST", chat_histor
     
     return base
 
-async def ask_gemini(prompt: str, system_prompt: str | None = None, user_lang: str = DEFAULT_LANG, skip_lang_instruction: bool = False) -> str:
+async def ask_gemini(prompt: str, system_prompt: Optional[str] = None, user_lang: str = DEFAULT_LANG, skip_lang_instruction: bool = False) -> str:
     """Вызов Gemini с таймаутом и обработкой ошибок."""
     base = system_prompt or ""
     if not skip_lang_instruction:
-        lang = user_lang if user_lang in ("ru", "kz") else DEFAULT_LANG
         lang = normalize_lang(user_lang) if normalize_lang(user_lang) in ("ru", "kk") else DEFAULT_LANG
         lang_name = "русском" if lang == "ru" else "казахском"
         lang_instruction = f"Отвечай на {lang_name} ({lang})."
@@ -1192,9 +1192,6 @@ async def ask_gemini(prompt: str, system_prompt: str | None = None, user_lang: s
 # ТЕКСТЫ
 # ═══════════════════════════════════════════════════════════════════════════
 
-def t(key: str, lang: str) -> str:
-    """Получить текст по ключу."""
-    lang = lang if lang in ("ru", "kz") else DEFAULT_LANG
 LOCALES = {
     "ru": {"welcome": "Добро пожаловать!", "register": "Регистрация"},
     "kk": {"welcome": "Қош келдіңіз!", "register": "Тіркелу"},
@@ -1217,9 +1214,6 @@ def t(key: str, lang: str = "ru") -> str:
 
     val = TEXTS.get(key)
     if isinstance(val, dict):
-        return val.get(lang, val.get(DEFAULT_LANG, ""))
-    return str(val or "")
-        # legacy TEXTS stored with "kz"
         if lang_norm == "kk":
             return val.get("kk", val.get("kz", val.get(DEFAULT_LANG, "")))
         return val.get(lang_norm, val.get(DEFAULT_LANG, ""))
@@ -1279,13 +1273,11 @@ class OnboardingState(StatesGroup):
 
 def lang_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Қазақша 🇰🇿", callback_data="lang:kz"),
         [InlineKeyboardButton(text="Қазақша 🇰🇿", callback_data="lang:kk"),
          InlineKeyboardButton(text="Русский 🇷🇺", callback_data="lang:ru")]
     ])
 
 def guest_menu_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
-    lang = lang if lang in ("ru", "kz") else DEFAULT_LANG
     lang = normalize_lang(lang) if normalize_lang(lang) in ("ru", "kk") else DEFAULT_LANG
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t("menu_chat", lang), callback_data="menu:chat")],
@@ -1294,7 +1286,6 @@ def guest_menu_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
     ])
 
 def member_menu_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
-    lang = lang if lang in ("ru", "kz") else DEFAULT_LANG
     lang = normalize_lang(lang) if normalize_lang(lang) in ("ru", "kk") else DEFAULT_LANG
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t("menu_chat", lang), callback_data="menu:chat")],
@@ -1304,7 +1295,6 @@ def member_menu_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
     ])
 
 def about_submenu_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
-    lang = lang if lang in ("ru", "kz") else DEFAULT_LANG
     lang = normalize_lang(lang) if normalize_lang(lang) in ("ru", "kk") else DEFAULT_LANG
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎯 Миссия", callback_data="about:mission")],
@@ -1337,7 +1327,6 @@ async def process_lang(callback: CallbackQuery, state: FSMContext) -> None:
     role = get_user_role(user_id)
     logger.info(f"[LANG] User {user_id} выбрал {lang}, роль: {role}")
     
-    if role == "MEMBER":
     if role in {ROLE_VOLUNTEER, ROLE_COORDINATOR, ROLE_WAREHOUSE_ADMIN}:
         await state.set_state(OnboardingState.member_menu)
         await callback.message.edit_text(t("intro_member", lang), reply_markup=member_menu_keyboard(lang))
@@ -1387,7 +1376,6 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = str(callback.from_user.id)
     role = get_user_role(user_id)
     
-    if role == "MEMBER":
     if role in {ROLE_VOLUNTEER, ROLE_COORDINATOR, ROLE_WAREHOUSE_ADMIN}:
         await state.set_state(OnboardingState.member_menu)
         await callback.message.edit_text(t("intro_member", lang), reply_markup=member_menu_keyboard(lang))
@@ -1414,7 +1402,37 @@ async def reg_name(message: Message, state: FSMContext) -> None:
     await state.set_state(OnboardingState.registration_age)
     await message.answer(t("ask_age", lang))
 
-@@ -521,199 +1425,595 @@ async def reg_skill(message: Message, state: FSMContext) -> None:
+@router.message(OnboardingState.registration_age, F.text)
+async def reg_age(message: Message, state: FSMContext) -> None:
+    age_text = message.text.strip()
+    data = await state.get_data()
+    lang = data.get("lang") or DEFAULT_LANG
+    
+    if not age_text.isdigit():
+        await message.answer(t("invalid_age", lang))
+        return
+    
+    age = int(age_text)
+    if age < 18:
+        await message.answer(t("underage", lang))
+        await state.clear()
+        await state.set_state(OnboardingState.guest_menu)
+        return
+    
+    await state.update_data(age=age)
+    await state.set_state(OnboardingState.registration_skill)
+    await message.answer(t("ask_skill", lang))
+
+@router.message(OnboardingState.registration_skill, F.text)
+async def reg_skill(message: Message, state: FSMContext) -> None:
+    skill = message.text.strip()
+    data = await state.get_data()
+    name = data.get("name")
+    age = data.get("age")
+    lang = data.get("lang") or DEFAULT_LANG
+    user_id = str(message.from_user.id)
+    username = message.from_user.username or ""
+    
     success = save_user_registration(user_id, name, age, skill, lang, username)
     
     if success:
@@ -1568,23 +1586,19 @@ async def chat_mode_message(message: Message, state: FSMContext) -> None:
         # ВЫЗЫВАЕМ Gemini
         reply = await ask_gemini(full_prompt, system_instruction, user_lang=lang, skip_lang_instruction=True)
         
-
         intent, request_id, clean_reply = parse_intent_tag(reply)
 
         # СОХРАНЯЕМ ответ в историю
-        chat_history.append({"role": "model", "content": reply})
-        
         chat_history.append({"role": "model", "content": clean_reply or reply})
 
         # ОГРАНИЧИВАЕМ память (max 20 сообщений)
         if len(chat_history) > 20:
             chat_history = chat_history[-20:]
         
-
         await state.update_data(chat_history=chat_history)
         
         # ОТПРАВЛЯЕМ ответ - используем html.quote для безопасности
-        safe_reply = html.quote(reply)
+        safe_reply = html.quote(clean_reply or reply)
 
         if intent == "INTENT_CLAIM" and request_id:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1605,7 +1619,6 @@ async def chat_mode_message(message: Message, state: FSMContext) -> None:
             return
 
         # ОТПРАВЛЯЕМ обычный ответ
-        safe_reply = html.quote(clean_reply or reply)
         await message.answer(safe_reply, parse_mode=ParseMode.HTML)
         
     except Exception as e:
@@ -1623,7 +1636,6 @@ async def member_menu_text(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     lang = data.get("lang") or DEFAULT_LANG
     await message.answer(t("use_menu_buttons", lang), reply_markup=member_menu_keyboard(lang))
-
 
 
 @router.message(Command("requests"))
@@ -1930,7 +1942,7 @@ async def finalize_team_join(callback: CallbackQuery) -> None:
 
 
 @router.message(Command("broadcast"))
-async def cmd_broadcast(message: Message, state: FSMContext, bot: Bot) -> None:
+async def cmd_broadcast(message: Message, bot: Bot) -> None:
     user_id = str(message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID:
         await message.answer("❌ Нет доступа.")
